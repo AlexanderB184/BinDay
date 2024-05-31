@@ -31,9 +31,9 @@ typedef enum block_type block_type;
 
 enum block_type { mem_avail, mem_used };
 
-typedef struct gc_header gc_header;
+typedef struct gc_head gc_head;
 
-struct gc_header {
+struct gc_head {
   size_t nptrs;
   int mark;
 };
@@ -45,7 +45,7 @@ struct mem_block {
   block_type type;
   union {
     mem_block* next_free;
-    gc_header header;
+    gc_head header;
   } contents;
   byte data[];
 };
@@ -59,7 +59,7 @@ struct mem_block {
   block_type type;
   union {
     mem_block* next_free;
-    struct gc_header {
+    struct gc_head {
       type_t data_type; // memory block acts as an array of type data_type
       size_t amount;
     } header;
@@ -93,10 +93,9 @@ struct garbage_collector_t {
 
 extern garbage_collector_t garbage_collector;
 
-void init(garbage_collector_t* gc, size_t starting_capacity);
-void release(garbage_collector_t* gc);
+void init();
 
-void collect(garbage_collector_t* gc);
+void gc();
 
 // SAFETY:
 // CANNOT SAVE POINTER DIRECTLY INTO OBJECT, MUST SAVE IT IN A INTERMEDIATE
@@ -105,16 +104,16 @@ void collect(garbage_collector_t* gc);
 // BE SAVED AT A RANDOM LOCATION.
 // IT IS RECOMMENDED TO USE "alloc_into_object", "alloc_into_root", OR
 // "alloc_into_attr" INSTEAD.
-external_ref_t alloc(garbage_collector_t*, size_t, size_t);
+external_ref_t alloc(size_t, size_t);
 
-#define get_ref(collector, root) (*item_from_root(collector, root))
+#define get_ref(root) (*item_from_root(root))
 
-#define get_val(collector, type, root) (*(type*)get_ref(collector, root))
+#define get_val(type, root) (*(type*)get_ref(root))
 
-void alloc_into_object(garbage_collector_t*, external_ref_t, size_t, size_t,
-                       size_t);
+void alloc_into_object(external_ref_t, size_t, size_t, size_t);
 
-void alloc_into_root(garbage_collector_t*, size_t, size_t, size_t);
+void alloc_into_root(size_t, size_t, size_t);
 
-#define alloc_into_attr(collector, type, attr, ptr, sz, nptrs) \
-  alloc_into_object((collector), (ptr), offsetof(type, attr), (sz), (nptrs))
+#define alloc_into_attr(type, attr, ptr, sz, nptrs) \
+  alloc_into_object((ptr), offsetof(type, attr), (sz), (nptrs))
+  
