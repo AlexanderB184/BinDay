@@ -5,12 +5,14 @@
 struct gc_item;
 typedef volatile void* external_ref_t;
 
-size_t add_roots(size_t);
+typedef struct garbage_collector_t garbage_collector_t;
 
-void remove_roots(size_t);
+size_t add_roots(garbage_collector_t*, size_t);
 
-void set_roots_back(size_t);
+void remove_roots(garbage_collector_t*,size_t);
 
-size_t get_root_count();
+void set_roots_back(garbage_collector_t*,size_t);
 
-external_ref_t* item_from_root(size_t);
+size_t get_root_count(garbage_collector_t*);
+
+external_ref_t* item_from_root(garbage_collector_t*,size_t);

@@ -14,7 +14,7 @@ typedef unsigned char byte;
 #define MEMORY_MAP_CAPACITY 0x1000
 #define MEMORY_MAP_MAX_BUCKETS MEMORY_MAP_CAPACITY * 13 / 10
 #define GC_STACK_SIZE 0x1000
-#define GC_MAX_MEMORY 0x8000
+#define GC_MAX_MEMORY 0x1000
 #define GC_ROOT_LIST_SIZE 0x1000
 
 typedef volatile void* external_ref_t;
@@ -91,11 +91,9 @@ struct garbage_collector_t {
   int mark;
 };
 
-extern garbage_collector_t garbage_collector;
+void init(garbage_collector_t* gc);
 
-void init();
-
-void gc();
+void collect(garbage_collector_t* gc);
 
 // SAFETY:
 // CANNOT SAVE POINTER DIRECTLY INTO OBJECT, MUST SAVE IT IN A INTERMEDIATE
@@ -104,16 +102,17 @@ void gc();
 // BE SAVED AT A RANDOM LOCATION.
 // IT IS RECOMMENDED TO USE "alloc_into_object", "alloc_into_root", OR
 // "alloc_into_attr" INSTEAD.
-external_ref_t alloc(size_t, size_t);
+external_ref_t alloc(garbage_collector_t* gc, size_t size, size_t nptrs);
 
-#define get_ref(root) (*item_from_root(root))
+#define get_ref(gc, root) (*item_from_root(gc, root))
 
-#define get_val(type, root) (*(type*)get_ref(root))
+#define get_val(gc, type, root) (*(type*)get_ref(gc, root))
 
-void alloc_into_object(external_ref_t, size_t, size_t, size_t);
+void alloc_into_object(garbage_collector_t* gc, external_ref_t ptr_to_obj,
+                       size_t offset, size_t size, size_t nptrs);
 
-void alloc_into_root(size_t, size_t, size_t);
+void alloc_into_root(garbage_collector_t* gc, size_t root, size_t size,
+                     size_t nptrs);
 
-#define alloc_into_attr(type, attr, ptr, sz, nptrs) \
-  alloc_into_object((ptr), offsetof(type, attr), (sz), (nptrs))
-  
+#define alloc_into_attr(gc, type, attr, ptr, sz, nptrs) \
+  alloc_into_object(gc, (ptr), offsetof(type, attr), (sz), (nptrs))
