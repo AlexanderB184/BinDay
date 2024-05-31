@@ -6,26 +6,24 @@
 
 #include "mmap.h"
 
-garbage_collector_t garbage_collector;
-
 #define get_item_header(item) (mem_block*)((item) - offsetof(mem_block, data))
 
-void recursive_mark();
-void mark_object(void*);
-void sweep();
-void defragment();
+void recursive_mark(garbage_collector_t* collector);
+void mark_object(garbage_collector_t* collector, void*);
+void sweep(garbage_collector_t* collector);
+void defragment(garbage_collector_t* collector);
 
-void print_memory() {
+void print_memory(garbage_collector_t* collector) {
   void* item;
   mem_block* header;
   size_t upto = 0;
-  printf("current mark:%d\n", garbage_collector.mark);
-  for (size_t root = 0; root < garbage_collector.root_list.count; root++) {
+  printf("current mark:%d\n", collector->mark);
+  for (size_t root = 0; root < collector->root_list.count; root++) {
     printf("root: %zu points to: %p\n", root,
-           garbage_collector.root_list.list_of_pointers[root]);
+           collector->root_list.list_of_pointers[root]);
   }
-  while (upto < garbage_collector.capacity) {
-    header = (mem_block*)(garbage_collector.memory + upto);
+  while (upto < collector->capacity) {
+    header = (mem_block*)(collector->memory + upto);
     item = &header->data;
 
     size_t block_size = header->size;
@@ -50,37 +48,40 @@ void print_memory() {
   }
 }
 
-void init() {
-  static byte buffer[GC_MAX_MEMORY];
-  static external_ref_t root_list[GC_ROOT_LIST_SIZE];
-
-  garbage_collector = (garbage_collector_t){
-      .memory = &buffer,
-      .capacity = GC_MAX_MEMORY,
+void init(garbage_collector_t* collector, size_t starting_capacity) {
+  void* buffer = malloc(starting_capacity);
+  *collector = (garbage_collector_t){
+      .memory = buffer,
+      .capacity = starting_capacity,
       .root_list =
-          (root_list_t){.list_of_pointers = (external_ref_t*)&root_list,
+          (root_list_t){.list_of_pointers = (external_ref_t*)malloc(256),
                         .count = 0,
-                        .capacity = GC_ROOT_LIST_SIZE},
+                        .capacity = 256},
 
       .isactive = 0,
       .mark = 0,
-      .free_list_head = (mem_block*)&buffer};
+      .free_list_head = (mem_block*)buffer};
 
-  memset(garbage_collector.free_list_head, 0, sizeof(mem_block));
+  memset(collector->free_list_head, 0, sizeof(mem_block));
 
-  *garbage_collector.free_list_head = (mem_block){
-      .size = GC_MAX_MEMORY, .type = mem_avail, .contents.next_free = NULL};
+  *collector->free_list_head = (mem_block){
+      .size = starting_capacity, .type = mem_avail, .contents.next_free = NULL};
+
 }
 
-void mark_object(void* object) {
+void release(garbage_collector_t* collector) {
+  free(collector->memory);
+  free(collector->root_list.list_of_pointers);
+}
+
+void mark_object(garbage_collector_t* collector, void* object) {
   if (object == NULL) {
     return;
   }
   mem_block* header = get_item_header(object);
 
-  if ((size_t)header < (size_t)garbage_collector.memory ||
-      (size_t)header >=
-          garbage_collector.capacity + (size_t)garbage_collector.memory) {
+  if ((size_t)header < (size_t)collector->memory ||
+      (size_t)header >= collector->capacity + (size_t)collector->memory) {
     fprintf(stderr, "ERROR: pointer points outside gc\n");
     return;
   }
@@ -93,29 +94,30 @@ void mark_object(void* object) {
     return;
   }
 
-  if (header->contents.header.mark == garbage_collector.mark) {
+  if (header->contents.header.mark == collector->mark) {
     return;
   }
 
-  header->contents.header.mark = garbage_collector.mark;
+  header->contents.header.mark = collector->mark;
 
   for (size_t i = 0;
        i < header->contents.header.nptrs && i < header->size / sizeof(void*);
        i++) {
-    mark_object(*((void**)(object) + i));
+    mark_object(collector, *((void**)(object) + i));
   }
 }
 
-void mark() {
+void mark(garbage_collector_t* collector) {
   // invert mark
-  garbage_collector.mark = ~garbage_collector.mark;
+  collector->mark = ~collector->mark;
   // iterate through roots to find reachable objects
-  for (size_t root = 0; root < garbage_collector.root_list.count; root++) {
-    if (*item_from_root(root)) mark_object((void*)*item_from_root(root));
+  for (size_t root = 0; root < collector->root_list.count; root++) {
+    if (*item_from_root(collector, root))
+      mark_object(collector, (void*)*item_from_root(collector, root));
   }
 }
 
-void defragment() {
+void defragment(garbage_collector_t* collector) {
   size_t gc_iterator = 0;
   size_t bump_pos = 0;
 
@@ -125,8 +127,8 @@ void defragment() {
   mmap memory_map;
   mmapinit(&memory_map);
 
-  while (gc_iterator < garbage_collector.capacity) {
-    mem_block* block = (mem_block*)(garbage_collector.memory + gc_iterator);
+  while (gc_iterator < collector->capacity) {
+    mem_block* block = (mem_block*)(collector->memory + gc_iterator);
     external_ref_t item = &block->data;
 
     size_t block_size = block->size;
@@ -136,7 +138,7 @@ void defragment() {
       continue;
     }
 
-    mem_block* new_block = (mem_block*)(garbage_collector.memory + bump_pos);
+    mem_block* new_block = (mem_block*)(collector->memory + bump_pos);
     external_ref_t new_item = &new_block->data;
     mmapinsert(&memory_map, (void*)item, (void*)new_item);
     memmove(new_block, block, block_size);
@@ -151,45 +153,43 @@ void defragment() {
     gc_iterator += block_size;
   }
 
-  mem_block* remainder = (mem_block*)(garbage_collector.memory + bump_pos);
-  *remainder = (mem_block){.size = garbage_collector.capacity - bump_pos,
+  mem_block* remainder = (mem_block*)(collector->memory + bump_pos);
+  *remainder = (mem_block){.size = collector->capacity - bump_pos,
                            .type = mem_avail,
                            .contents.next_free = NULL};
-  garbage_collector.free_list_head = remainder;
+  collector->free_list_head = remainder;
 
   for (size_t i = 0; i < pointer_count; i++) {
     external_ref_t* itemptr = pointer_queue[i];  // pop stack
     *itemptr = mmaplookup(&memory_map, (void*)*itemptr);
   }
 
-  for (size_t root = 0; root < garbage_collector.root_list.count; root++) {
-    volatile void** itemptr =
-        &garbage_collector.root_list.list_of_pointers[root];
+  for (size_t root = 0; root < collector->root_list.count; root++) {
+    volatile void** itemptr = &collector->root_list.list_of_pointers[root];
     if (*itemptr) *itemptr = mmaplookup(&memory_map, *(void**)itemptr);
   }
 }
 
-void sweep() {
+void sweep(garbage_collector_t* collector) {
   size_t gc_iterator = 0;
   size_t max_free = 0;
   size_t total_free = 0;
   mem_block* prev_free = NULL;
   mem_block* prev_block = NULL;
-  while (gc_iterator < garbage_collector.capacity) {
-    mem_block* curr_block =
-        (mem_block*)(garbage_collector.memory + gc_iterator);
+  while (gc_iterator < collector->capacity) {
+    mem_block* curr_block = (mem_block*)(collector->memory + gc_iterator);
     size_t bytes_to_next_block = curr_block->size;
 
     switch (curr_block->type) {
       case mem_used: {
-        if (curr_block->contents.header.mark == garbage_collector.mark) {
+        if (curr_block->contents.header.mark == collector->mark) {
           break;  // memory still in use DO NOT FREE
         }
         total_free += curr_block->size;
         curr_block->type = mem_avail;
         curr_block->contents.next_free = NULL;
         if (prev_free == NULL) {
-          garbage_collector.free_list_head = curr_block;
+          collector->free_list_head = curr_block;
           prev_free = curr_block;
         } else if (prev_block->type == mem_avail) {
           prev_block->size += curr_block->size;
@@ -211,7 +211,7 @@ void sweep() {
         }
 
         if (!prev_free) {
-          garbage_collector.free_list_head = curr_block;
+          collector->free_list_head = curr_block;
           prev_free = curr_block;
           curr_block->contents.next_free = NULL;
         } else if (prev_block && prev_block->type == mem_avail) {
@@ -231,51 +231,70 @@ void sweep() {
     prev_block = curr_block;
     gc_iterator += bytes_to_next_block;
   }
+  
+  size_t free_percent = (total_free * 100) / collector->capacity;
+  size_t fragmentation = total_free ? ((total_free - max_free) * 100) / total_free : 100;
 
-  double fragmentation = (double)(total_free - max_free) / (double)total_free;
-
-  if (fragmentation > 0.75) {
-    defragment();
+  if (free_percent > 90) {
+    // expand buffer
+    //size_t new_cap = collector->capacity * 3 / 2;
+    //void* new_buf = malloc(new_cap);
+    //defragment(collector, new_buf, new_cap);
+    //free(collector->memory);
+    //collector->memory = new_buf;
+    //collector->capacity = new_cap;
+  } else if (free_percent < 20) {
+    // truncate buffer
+    //size_t new_cap = collector->capacity / 2;
+    //void* new_buf = malloc(new_cap);
+    //defragment(collector, new_buf, new_cap);
+    //free(collector->memory);
+    //collector->memory = new_buf;
+    //collector->capacity = new_cap;
+  } else if (fragmentation > 75) {
+    //defragment(collector, collector->memory, collector->capacity);
   }
 }
 
-void gc() {
-  if (garbage_collector.isactive) {
+void collect(garbage_collector_t* collector) {
+  if (collector->isactive) {
     fprintf(stderr, "gc called while active");
     exit(1);
   }
 
-  garbage_collector.isactive = 1;
+  collector->isactive = 1;
 
-  mark();
+  mark(collector);
 
-  sweep();
+  sweep(collector);
 
-  garbage_collector.isactive = 0;
+  collector->isactive = 0;
 }
 
-void alloc_into_root(size_t root, size_t size, size_t nptrs) {
-  external_ref_t allocation = alloc(size, nptrs);
-  *item_from_root(root) = allocation;
+void alloc_into_root(garbage_collector_t* collector, size_t root, size_t size,
+                     size_t nptrs) {
+  external_ref_t allocation = alloc(collector, size, nptrs);
+  *item_from_root(collector, root) = allocation;
 }
 
-void alloc_into_object(external_ref_t obj, size_t offset, size_t size,
-                       size_t nptrs) {
-  size_t t = add_roots(1);
-  *item_from_root(t) = obj;
-  external_ref_t allocation = alloc(size, nptrs);
-  external_ref_t moved_obj = *item_from_root(t);
+void alloc_into_object(garbage_collector_t* collector, external_ref_t obj,
+                       size_t offset, size_t size, size_t nptrs) {
+  size_t t = add_roots(collector, 1);
+  *item_from_root(collector, t) = obj;
+  external_ref_t allocation = alloc(collector, size, nptrs);
+  external_ref_t moved_obj = *item_from_root(collector, t);
   *(external_ref_t*)(moved_obj + offset) = allocation;
-  remove_roots(1);
+  remove_roots(collector, 1);
 }
 
-external_ref_t alloc(size_t size, size_t nptrs) {
+external_ref_t alloc(garbage_collector_t* collector, size_t size,
+                     size_t nptrs) {
   static bool gc_called = false;
 
   size_t blocksize = size + sizeof(mem_block);
   mem_block* prev = NULL;
 
-  for (mem_block* block = garbage_collector.free_list_head; block;
+  for (mem_block* block = collector->free_list_head; block;
        block = block->contents.next_free) {
     if (block->type != mem_avail) {
       fprintf(stderr, "allocated block in free list\n");
@@ -296,15 +315,15 @@ external_ref_t alloc(size_t size, size_t nptrs) {
       if (prev) {
         prev->contents.next_free = block->contents.next_free;
       } else {
-        garbage_collector.free_list_head = block->contents.next_free;
+        collector->free_list_head = block->contents.next_free;
       }
 
       memset(block, 0, blocksize);
 
       *block = (mem_block){.size = blocksize,
                            .type = mem_used,
-                           .contents.header = (gc_head){
-                               .mark = garbage_collector.mark, .nptrs = nptrs}};
+                           .contents.header = (gc_header){
+                               .mark = collector->mark, .nptrs = nptrs}};
 
       gc_called = false;
       return (external_ref_t)&block->data;
@@ -322,15 +341,15 @@ external_ref_t alloc(size_t size, size_t nptrs) {
       if (prev) {
         prev->contents.next_free = free_block;
       } else {
-        garbage_collector.free_list_head = free_block;
+        collector->free_list_head = free_block;
       }
 
       memset(block, 0, blocksize);
 
       *block = (mem_block){.size = blocksize,
                            .type = mem_used,
-                           .contents.header = (gc_head){
-                               .mark = garbage_collector.mark, .nptrs = nptrs}};
+                           .contents.header = (gc_header){
+                               .mark = collector->mark, .nptrs = nptrs}};
 
       gc_called = false;
       return (external_ref_t)&block->data;
@@ -339,10 +358,19 @@ external_ref_t alloc(size_t size, size_t nptrs) {
 
   if (!gc_called) {
     // try gc
-    gc();
+    collect(collector);
     gc_called = true;
-    return alloc(size, nptrs);
+    return alloc(collector, size, nptrs);
   }
+
+  //size_t new_cap = collector->capacity * 3 / 2;
+  //printf("new cap: %zu\n", new_cap);
+  //void* new_buf = malloc(new_cap);
+  defragment(collector);
+  //free(collector->memory);
+  //collector->memory = new_buf;
+  //collector->capacity = new_cap;
+  return alloc(collector, size, nptrs);
 
   // no block with sufficient space
   fprintf(stderr, "alloc error: out of memory\n");
